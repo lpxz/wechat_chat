@@ -83,6 +83,8 @@ async def chat_ws(ws: WebSocket):
 
             history.append({"role": "user", "content": text})
             history[:] = history[-MAX_MESSAGES:]
+            if history and history[0]["role"] == "assistant":
+                history.pop(0)
 
             collected = []
             try:
@@ -98,5 +100,7 @@ async def chat_ws(ws: WebSocket):
 
             history.append({"role": "assistant", "content": "".join(collected)})
             history[:] = history[-MAX_MESSAGES:]
+            if history and history[0]["role"] == "assistant":
+                history.pop(0)
     except WebSocketDisconnect:
         return
