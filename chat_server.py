@@ -18,6 +18,9 @@ from fastapi.responses import FileResponse
 
 load_dotenv()
 
+if not os.environ.get("GROQ_API_KEY", "").strip():
+    print("[server] GROQ_API_KEY is not set")
+
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.1-8b-instant"
 MAX_MESSAGES = 40  # 20 turns
@@ -58,7 +61,10 @@ async def groq_stream(messages: List[dict]) -> AsyncIterator[str]:
                 if data == "[DONE]":
                     break
                 chunk = json.loads(data)
-                delta = chunk["choices"][0].get("delta") or {}
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
                 text = delta.get("content") or ""
                 if text:
                     yield text
