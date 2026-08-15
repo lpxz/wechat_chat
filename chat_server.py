@@ -9,6 +9,7 @@ chat_server.py — WeChat-like chat over WebSocket, replies streamed from Groq.
 
 import json
 import os
+from pathlib import Path
 from typing import AsyncIterator, List
 
 import httpx
@@ -16,6 +17,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
+load_dotenv(Path.home() / ".env")
 load_dotenv()
 
 if not os.environ.get("GROQ_API_KEY", "").strip():

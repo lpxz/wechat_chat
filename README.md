@@ -13,8 +13,7 @@ A WeChat-style chat window. Each send goes over a **WebSocket**. The server call
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-# edit .env and set GROQ_API_KEY
+# Key can live in ~/.env (GROQ_API_KEY=...) or a local .env — never commit either.
 uvicorn chat_server:app --port 8080 --reload
 ```
 
