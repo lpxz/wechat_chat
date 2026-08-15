@@ -1,0 +1,151 @@
+# Knowledge: WeChat-like Groq chat
+
+How this app is put together — WebSocket, FastAPI, Uvicorn, Groq streaming.
+
+## The path of one message
+
+```
+you type  →  green bubble  →  WebSocket {"type":"user","text":"..."}
+                                    ↓
+                         FastAPI  WS /ws  (chat_ws)
+                                    ↓
+                    groq_stream  (httpx, stream=True)
+                                    ↓
+         {"type":"token"} {"type":"token"} … {"type":"done"}
+                                    ↓
+                         left bubble grows
+```
+
+The calculator used `POST /calc` (one request, one JSON reply). Chat keeps a connection open so the server can push many small `token` frames as the model generates them.
+
+## Who does what
+
+| Piece | Role |
+| --- | --- |
+| **Uvicorn** | Process that listens on port 8080. Speaks HTTP and WebSockets. Loads `chat_server:app`. |
+| **FastAPI** | The app. You write the endpoints. Same `app` can do REST and WebSockets. |
+| **ASGI** | Contract between Uvicorn and FastAPI. Async; long-lived connections OK. |
+| **Groq** | Inference API (`api.groq.com`). Runs **Meta’s Llama**, not a Groq-trained model. |
+| **`llama-3.1-8b-instant`** | The model this app calls. Fast 8B Llama hosted by Groq. |
+
+```bash
+uvicorn chat_server:app --port 8080 --reload
+```
+
+- `chat_server:app` — import `chat_server.py`, use the `app` object
+- `--port 8080` — listen here
+- `--reload` — restart on file save (dev only)
+
+Browser talks to Uvicorn → Uvicorn hands the connection to FastAPI → FastAPI runs your functions.
+
+## WSGI vs ASGI
+
+**WSGI** (Web Server Gateway Interface): one request, one response. Enough for `POST /calc`. Typical server: Gunicorn.
+
+**ASGI** (Asynchronous Server Gateway Interface): that, plus **streaming** and **WebSockets**. Typical server: Uvicorn.
+
+For simplicity: WSGI = one shot. ASGI = that, plus streaming and WebSockets.
+
+FastAPI is an ASGI app, so one process can serve both:
+
+- **REST / HTTP:** `GET /` returns `chat_ui.html`
+- **WebSocket:** `/ws` stays open for chat frames
+
+## Key entry points
+
+### `chat_ui.html`
+
+1. **Open the socket** (the only connection to the server):
+
+```js
+const proto = location.protocol === "https:" ? "wss://" : "ws://";
+const ws = new WebSocket(proto + location.host + "/ws");
+```
+
+2. **`send()`** — Send / Enter. Paint a green bubble, then one JSON frame. Does not wait for Groq.
+
+3. **`ws` `message` handler** — `token` grows `liveBot`; `done` freezes it; `error` is a red system line.
+
+4. **`addRow`** — creates me / bot / sys rows. `liveBot` is the bubble currently being typed.
+
+There is no `POST`. Send writes onto the existing `/ws` connection.
+
+### `chat_server.py`
+
+1. **`GET /`** → `serve_ui()` → `FileResponse("chat_ui.html")`
+
+2. **`@app.websocket("/ws")` → `chat_ws`** — receives every send. `history` is one list per tab; close the tab and it is gone.
+
+3. **`groq_stream`** — raw `httpx` POST to `https://api.groq.com/openai/v1/chat/completions` with `stream: True`. Groq replies in SSE lines (`data: {...}`). Each `delta.content` is `yield`ed as a token.
+
+4. **The loop** — receive user → append to history → stream tokens over the socket → `done`. On failure, send `error` and drop that user turn from history.
+
+If you only read four things: `send()` → `chat_ws` → `groq_stream` → the `message` listener.
+
+## Protocol
+
+Client → server:
+
+```json
+{"type": "user", "text": "hello"}
+```
+
+Server → client:
+
+```json
+{"type": "token", "text": "Hi"}
+{"type": "token", "text": " there"}
+{"type": "done"}
+```
+
+On failure:
+
+```json
+{"type": "error", "text": "..."}
+```
+
+Empty text is ignored. Unknown types are ignored.
+
+## Groq vs Grok
+
+No connection. The names just look alike.
+
+- **Groq** — Groq, Inc. Fast inference chips + API. This app uses it.
+- **Grok** — xAI’s chatbot/model. Not used here.
+
+Groq hosts other people’s models. This app uses Meta’s Llama, not Grok, and not a Groq-trained LLM.
+
+## API key and limits
+
+The key lives in `~/.env` as `GROQ_API_KEY=...` (or a local `.env`). The server loads it; the browser never sees it. **Never commit `.env` or the key.** `.gitignore` blocks `.env` and `**/.env`. Only `.env.example` (empty value) is in git.
+
+Free ≠ unlimited. Free ≠ safe to publish. The key is the meter. Limits are per **account**, not per extra key.
+
+For `llama-3.1-8b-instant` on Groq’s free plan (check the console; numbers move):
+
+| Limit | Amount |
+| --- | --- |
+| Requests per minute | 30 |
+| Requests per day | 14,400 |
+| Tokens per minute | 6,000 |
+| Tokens per day | 500,000 |
+
+Each chat send is one request. 30/min is a lot for one person typing; it is small if many users share one key. Over the cap, Groq returns **429** and the UI shows a red error line.
+
+Live quota: https://console.groq.com/settings/limits  
+Docs: https://console.groq.com/docs/rate-limits  
+Free key: https://console.groq.com/keys
+
+## Why a follow-up remembers the first message
+
+After a successful reply, the server appends `{role: assistant, content: full text}` to that socket’s `history`. The next Groq call sends the whole list (plus a short system prompt), capped at 20 turns (40 messages, pairs kept aligned). A failed call pops the last user message so a broken turn is not kept.
+
+## Files
+
+| File | Role |
+| --- | --- |
+| `chat_ui.html` | WeChat-like window + WebSocket client |
+| `chat_server.py` | FastAPI: `GET /`, `/ws`, Groq stream, in-memory history |
+| `requirements.txt` | fastapi, uvicorn, websockets, httpx, python-dotenv |
+| `.env.example` | `GROQ_API_KEY=` (empty; safe to commit) |
+| `README.md` | How to run |
