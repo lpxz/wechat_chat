@@ -82,6 +82,61 @@ There is no `POST`. Send writes onto the existing `/ws` connection.
 
 If you only read four things: `send()` → `chat_ws` → `groq_stream` → the `message` listener.
 
+## WebSocket in the browser
+
+A WebSocket is not a visible element. A button is a DOM node you can see and click. `ws` is a JavaScript object: a pipe to the server. Same `addEventListener` pattern, no physical appearance.
+
+```js
+sendBtn.addEventListener("click", send);          // user clicked Send
+ws.addEventListener("message", (ev) => { ... });  // server sent data
+```
+
+`new WebSocket(...)` runs when the parser hits the `<script>` at the bottom of `<body>` — during HTML parsing (`document.readyState === "loading"`), not `onload`. Elements above the script (`#log`, `#input`, `#send`) already exist.
+
+### Standard events (exactly four)
+
+These are the WebSocket API, not something this page invented:
+
+| Event | When |
+| --- | --- |
+| `"open"` | Connected and ready to `send()` |
+| `"message"` | The other side sent data (`ev.data`) |
+| `"error"` | The **pipe** failed (details usually arrive on `"close"`) |
+| `"close"` | Connection ended (`ev.code`, `ev.reason`, `ev.wasClean`) |
+
+This page listens to `"message"` and `"close"`. `"open"` and `"error"` exist but are unused.
+
+There is no `"send"` event. Browser WebSockets also do not expose ping/pong as events.
+
+### `send` is an API call, not an event
+
+Events notify you of things that happen *to* you. Outbound data is something **you** do, so it is a method:
+
+```js
+ws.send(JSON.stringify({ type: "user", text }));
+```
+
+That queues JSON on the socket. Nothing fires because of it. You already know you called it.
+
+Same idea as the button: `sendBtn.click()` is a method you trigger; `"click"` is an event the user triggers.
+
+### Two layers of "error"
+
+The `"message"` handler also branches on `msg.type === "error"`. That is **not** the WebSocket `"error"` event. It is JSON *inside* a normal `"message"`.
+
+| Layer | What | Meaning |
+| --- | --- | --- |
+| Transport | `"error"` / `"close"` events | The **pipe** broke |
+| App protocol | `{"type":"error","text":"..."}` | The pipe is fine; **Groq failed** |
+
+If Groq throws, the server still uses the open socket:
+
+```python
+await ws.send_text(json.dumps({"type": "error", "text": str(e)}))
+```
+
+The browser gets a `"message"`; the handler shows a red sys row. If the socket itself died, there is no such JSON — the `"close"` listener shows "Disconnected from server".
+
 ## Protocol
 
 Client → server:
