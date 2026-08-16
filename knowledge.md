@@ -82,7 +82,7 @@ There is no `POST`. Send writes onto the existing `/ws` connection.
 
 If you only read four things: `send()` → `chat_ws` → `groq_stream` → the `message` listener.
 
-## WebSocket in the browser
+## WebSocket
 
 A WebSocket is not a visible element. A button is a DOM node you can see and click. `ws` is a JavaScript object: a pipe to the server. Same `addEventListener` pattern, no physical appearance.
 
@@ -137,7 +137,7 @@ await ws.send_text(json.dumps({"type": "error", "text": str(e)}))
 
 The browser gets a `"message"`; the handler shows a red sys row. If the socket itself died, there is no such JSON — the `"close"` listener shows "Disconnected from server".
 
-## Protocol
+### Protocol
 
 Client → server:
 
@@ -160,6 +160,53 @@ On failure:
 ```
 
 Empty text is ignored. Unknown types are ignored.
+
+### Server: `await ws.receive_text()`
+
+`chat_ws` starts when the browser runs `new WebSocket(... + "/ws")`. FastAPI calls `chat_ws(ws)` and passes **this tab's** connection as `ws`. The name `ws` is not magic; the association is that the coroutine awaits methods on that object.
+
+```python
+await ws.accept()                 # handshake; browser then gets "open"
+raw = await ws.receive_text()     # park until the next inbound text (or disconnect)
+```
+
+The `while True` **does** start right after `accept()`. It stops at `receive_text()`. On connect, nothing after that `await` runs yet. The coroutine is idle, waiting.
+
+`await` suspends this coroutine; the thread is free for other connections. When bytes arrive, the **event loop** (Uvicorn / asyncio) resumes it — not the OS calling your function directly.
+
+What that `await` waits for: **the next incoming text frame on this connection**, or a disconnect. It is not a general “`ws` state changed” wait. `"open"` already happened (`accept()`). `send_text()` does not wake it.
+
+There is no `"receive_text"` event. Browser incoming data is `addEventListener("message", ...)`. Server incoming data is a **call that waits**: `await ws.receive_text()`. Same fact (“text arrived”), different style. You pull the next message.
+
+The scheduler never hears the name `receive_text`. That function is a translation layer: app “next text please” down to a wait the runtime already understands.
+
+```
+await ws.receive_text()          # app (FastAPI): next text on this ws
+        ↓
+await asgi_receive()             # Starlette: next ASGI message
+        ↓
+await queue.get()                # Uvicorn: this connection's queue
+        ↓
+Future / “fd 17 is readable”     # asyncio + kqueue (macOS)
+```
+
+Each tab is its own chain: this coroutine → this `ws` → this TCP socket (a file descriptor). The loop keeps a table like fd 17 → connection A, fd 23 → connection B. `history` is just a list; it has no socket.
+
+The kernel does **not** register “data only, ignore close.” It usually watches the socket for **readable**, which covers both “data arrived” and “peer closed.” Uvicorn interprets the bytes:
+
+- text frame → `receive_text()` returns the string
+- disconnect → the same `await` raises `WebSocketDisconnect`
+
+### Separation of duties
+
+| Layer | Sees | Does |
+| --- | --- | --- |
+| Kernel | bytes on a socket (readable) | Wakes the event loop |
+| Uvicorn | WebSocket frames → ASGI (`websocket.receive` / `websocket.disconnect`) | Fills this connection's queue |
+| FastAPI `receive_text()` | ASGI message | Return text, or raise `WebSocketDisconnect` |
+| `chat_ws` | chat JSON (`type: user`) | History, Groq, `token` / `done` / `error` frames |
+
+The kernel never sees WebSocket or `receive_text`. Your code never sees kqueue. Each layer only sees its own.
 
 ## Groq vs Grok
 
