@@ -9,8 +9,9 @@ chat_server.py — WeChat-like chat over WebSocket, replies streamed from Groq.
 
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, List
+from typing import AsyncIterator, List, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -28,7 +29,25 @@ GROQ_MODEL = "llama-3.1-8b-instant"
 MAX_MESSAGES = 40  # 20 turns
 SYSTEM = {"role": "system", "content": "You are a friendly chat assistant. Keep replies concise."}
 
-app = FastAPI()
+# True: one AsyncClient for the process (pool, closed on shutdown).
+# False: new AsyncClient per groq_stream call (TCP torn down every reply).
+LONG_LIVED_HTTP_CLIENT = True
+
+http_client: Optional[httpx.AsyncClient] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global http_client
+    if LONG_LIVED_HTTP_CLIENT:
+        http_client = httpx.AsyncClient(timeout=60.0)
+    yield
+    if http_client is not None:
+        await http_client.aclose()
+        http_client = None
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/")
@@ -51,8 +70,8 @@ async def groq_stream(messages: List[dict]) -> AsyncIterator[str]:
         "stream": True,
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        async with client.stream("POST", GROQ_URL, headers=headers, json=payload) as resp:
+    if LONG_LIVED_HTTP_CLIENT:
+        async with http_client.stream("POST", GROQ_URL, headers=headers, json=payload) as resp:
             if resp.status_code != 200:
                 body = (await resp.aread()).decode("utf-8", errors="replace")
                 raise RuntimeError(f"Groq request failed: {resp.status_code} {body[:300]}")
@@ -70,6 +89,26 @@ async def groq_stream(messages: List[dict]) -> AsyncIterator[str]:
                 text = delta.get("content") or ""
                 if text:
                     yield text
+    else:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            async with client.stream("POST", GROQ_URL, headers=headers, json=payload) as resp:
+                if resp.status_code != 200:
+                    body = (await resp.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"Groq request failed: {resp.status_code} {body[:300]}")
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:].strip()
+                    if data == "[DONE]":
+                        break
+                    chunk = json.loads(data)
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    text = delta.get("content") or ""
+                    if text:
+                        yield text
 
 
 @app.websocket("/ws")
